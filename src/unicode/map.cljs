@@ -557,7 +557,7 @@
 (defn init []
   (bind-system-theme!)
   (bind-events)
-  (-> (js/fetch "/data/map.json")
+  (-> (js/fetch "data/map.json")
       (.then (fn [response] (.json response)))
       (.then
        (fn [data]
