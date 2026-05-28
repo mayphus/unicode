@@ -75,6 +75,11 @@
          :drag-start-x 0
          :drag-start-y 0
          :drag-moved? false
+         :pinching? false
+         :pinch-distance 0
+         :pinch-start-zoom 0.05
+         :pinch-world-x 0
+         :pinch-world-y 0
          :selected 0x4E00
          :hover nil
          :font "system-ui"
@@ -82,6 +87,7 @@
          :plane-gap-cells 0}))
 
 (def render-frame (atom nil))
+(def active-pointers (atom {}))
 
 (declare draw update-hud)
 
@@ -338,6 +344,69 @@
            :offset-y (- y (* world-y next-zoom)))
     (request-draw)))
 
+(defn pointer-position [event]
+  {:x (.-clientX event)
+   :y (.-clientY event)})
+
+(defn pointer-distance [a b]
+  (js/Math.hypot (- (:x b) (:x a))
+                 (- (:y b) (:y a))))
+
+(defn pointer-midpoint [a b]
+  {:x (/ (+ (:x a) (:x b)) 2)
+   :y (/ (+ (:y a) (:y b)) 2)})
+
+(defn two-pointers []
+  (let [points (take 2 (vals @active-pointers))]
+    (when (= 2 (count points))
+      points)))
+
+(defn start-pinch! []
+  (when-let [[a b] (two-pointers)]
+    (let [distance (pointer-distance a b)
+          midpoint (pointer-midpoint a b)
+          {world-x :x world-y :y} (screen->world (:x midpoint) (:y midpoint))]
+      (when (pos? distance)
+        (swap! state assoc
+               :pinching? true
+               :dragging? true
+               :drag-moved? true
+               :pinch-distance distance
+               :pinch-start-zoom (:zoom @state)
+               :pinch-world-x world-x
+               :pinch-world-y world-y)
+        (.add (.-classList canvas) "dragging")))))
+
+(defn update-pinch! []
+  (when-let [[a b] (two-pointers)]
+    (let [distance (pointer-distance a b)
+          midpoint (pointer-midpoint a b)
+          base-distance (:pinch-distance @state)]
+      (when (and (pos? distance) (pos? base-distance))
+        (let [next-zoom (clamp (* (:pinch-start-zoom @state)
+                                  (/ distance base-distance))
+                               0.01 4)]
+          (swap! state assoc
+                 :zoom next-zoom
+                 :offset-x (- (:x midpoint) (* (:pinch-world-x @state) next-zoom))
+                 :offset-y (- (:y midpoint) (* (:pinch-world-y @state) next-zoom))
+                 :drag-moved? true)
+          (request-draw))))))
+
+(defn continue-single-pointer-drag! []
+  (if-let [point (first (vals @active-pointers))]
+    (swap! state assoc
+           :pinching? false
+           :dragging? true
+           :drag-x (:x point)
+           :drag-y (:y point)
+           :drag-start-x (:x point)
+           :drag-start-y (:y point)
+           :drag-moved? true)
+    (do
+      (.remove (.-classList canvas) "dragging")
+      (swap! state assoc :pinching? false :dragging? false))))
+
 (defn jump-to [cp]
   (let [cp (clamp cp 0 (:max-codepoint @state))
         {:keys [x y]} (codepoint->world cp)
@@ -536,19 +605,28 @@
    (fn [event]
      (.preventDefault event)
      (.setPointerCapture canvas (.-pointerId event))
-     (swap! state assoc
-            :dragging? true
-            :drag-x (.-clientX event)
-            :drag-y (.-clientY event)
-            :drag-start-x (.-clientX event)
-            :drag-start-y (.-clientY event)
-            :drag-moved? false)
-     (.add (.-classList canvas) "dragging")))
+     (swap! active-pointers assoc (.-pointerId event) (pointer-position event))
+     (if (>= (count @active-pointers) 2)
+       (start-pinch!)
+       (do
+         (swap! state assoc
+                :dragging? true
+                :pinching? false
+                :drag-x (.-clientX event)
+                :drag-y (.-clientY event)
+                :drag-start-x (.-clientX event)
+                :drag-start-y (.-clientY event)
+                :drag-moved? false)
+         (.add (.-classList canvas) "dragging")))))
   (.addEventListener
    canvas "pointermove"
    (fn [event]
      (.preventDefault event)
-     (if (:dragging? @state)
+     (swap! active-pointers assoc (.-pointerId event) (pointer-position event))
+     (cond
+       (:pinching? @state) (update-pinch!)
+       (>= (count @active-pointers) 2) (start-pinch!)
+       (:dragging? @state)
        (do
          (swap! state
                 (fn [s]
@@ -566,6 +644,7 @@
                                                       (* total-dy total-dy))
                                                    36)))))))
          (request-draw))
+       :else
        (do
          (swap! state assoc :hover (screen->codepoint (.-clientX event) (.-clientY event)))
          (update-hud)))))
@@ -574,23 +653,31 @@
    (fn [event]
      (.preventDefault event)
      (.releasePointerCapture canvas (.-pointerId event))
-     (let [was-drag? (:drag-moved? @state)
+     (swap! active-pointers dissoc (.-pointerId event))
+     (let [was-drag? (or (:drag-moved? @state) (:pinching? @state))
            plane (screen->plane (.-clientX event) (.-clientY event))]
-       (swap! state assoc :dragging? false)
-       (.remove (.-classList canvas) "dragging")
-       (cond
-         was-drag? nil
-         (and plane (overview?)) (fit-plane plane)
-         :else (when-let [cp (screen->codepoint (.-clientX event) (.-clientY event))]
-                 (swap! state assoc :selected cp)
-                 (update-hud)
-                 (request-draw))))))
+       (if (seq @active-pointers)
+         (continue-single-pointer-drag!)
+         (do
+           (swap! state assoc :dragging? false :pinching? false)
+           (.remove (.-classList canvas) "dragging")
+           (cond
+             was-drag? nil
+             (and plane (overview?)) (fit-plane plane)
+             :else (when-let [cp (screen->codepoint (.-clientX event) (.-clientY event))]
+                     (swap! state assoc :selected cp)
+                     (update-hud)
+                     (request-draw))))))))
   (.addEventListener
    canvas "pointercancel"
    (fn [event]
      (.preventDefault event)
-     (.remove (.-classList canvas) "dragging")
-     (swap! state assoc :dragging? false :drag-moved? false)))
+     (swap! active-pointers dissoc (.-pointerId event))
+     (if (seq @active-pointers)
+       (continue-single-pointer-drag!)
+       (do
+         (.remove (.-classList canvas) "dragging")
+         (swap! state assoc :dragging? false :pinching? false :drag-moved? false)))))
   (.addEventListener
    canvas "wheel"
    (fn [event]
