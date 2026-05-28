@@ -4,6 +4,7 @@
  :aliases
  {:cljs
   {:main-opts ["-m" "cljs.main"
+               "-co" "{:browser-repl false}"
                "-O" "simple"
                "-o" "public/app.js"
                "-c" "unicode.map"]}}}
