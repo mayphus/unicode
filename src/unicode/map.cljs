@@ -8,11 +8,11 @@
 (def hud (.getElementById js/document "hud"))
 (def font-file (.getElementById js/document "font-file"))
 
-(def colors
+(def dark-colors
   {:background "#121614"
    :plane-a "rgba(85, 109, 96, 0.16)"
    :plane-b "rgba(92, 83, 116, 0.16)"
-   :plane-line "rgba(244, 241, 232, 0.18)"
+   :plane-line "rgba(244, 241, 232, 0.42)"
    :grid "rgba(244, 241, 232, 0.08)"
    :text "#f4f1e8"
    :muted "#b8b6aa"
@@ -23,8 +23,44 @@
    :private "#5f6f52"
    :seed-block "#2f6d69"})
 
+(def light-colors
+  {:background "#f6f4ef"
+   :plane-a "rgba(114, 142, 124, 0.18)"
+   :plane-b "rgba(122, 114, 150, 0.16)"
+   :plane-line "rgba(37, 43, 39, 0.42)"
+   :grid "rgba(37, 43, 39, 0.11)"
+   :text "#222722"
+   :muted "#5c625b"
+   :selected "#b57400"
+   :default "#dce4dc"
+   :control "#b8a8c7"
+   :surrogate "#d49aa1"
+   :private "#b9c7a7"
+   :seed-block "#a7cfca"})
+
+(def dark-kind-colors
+  #js ["#1d2420" "#6d597a" "#8b3340" "#5f6f52" "#2f6d69"])
+
+(def light-kind-colors
+  #js ["#dce4dc" "#b8a8c7" "#d49aa1" "#b9c7a7" "#a7cfca"])
+
+(def dark-kind-alphas
+  #js [0.06 0.42 0.42 0.42 0.32])
+
+(def light-kind-alphas
+  #js [0.22 0.58 0.55 0.55 0.48])
+
+(def colors (atom dark-colors))
+(def kind-colors (atom dark-kind-colors))
+(def kind-alphas (atom dark-kind-alphas))
+
 (def state
   (atom {:data nil
+         :kind-by-cp nil
+         :range-by-cp nil
+         :block-by-cp nil
+         :script-by-cp nil
+         :assigned-by-cp nil
          :dpr 1
          :columns 256
          :max-codepoint 0x10FFFF
@@ -39,9 +75,35 @@
          :hover nil
          :font "system-ui"
          :plane-grid-columns 5
-         :plane-gap-cells 24}))
+         :plane-gap-cells 0}))
+
+(def render-frame (atom nil))
 
 (declare draw update-hud)
+
+(defn request-draw []
+  (when-not @render-frame
+    (reset! render-frame
+            (.requestAnimationFrame
+             js/window
+             (fn [_]
+               (reset! render-frame nil)
+               (draw))))))
+
+(defn apply-theme! [light?]
+  (reset! colors (if light? light-colors dark-colors))
+  (reset! kind-colors (if light? light-kind-colors dark-kind-colors))
+  (reset! kind-alphas (if light? light-kind-alphas dark-kind-alphas))
+  (.setAttribute (.-documentElement js/document) "data-theme" (if light? "light" "dark"))
+  (request-draw))
+
+(defn bind-system-theme! []
+  (let [query (.matchMedia js/window "(prefers-color-scheme: light)")
+        sync-theme (fn [event] (apply-theme! (.-matches event)))]
+    (apply-theme! (.-matches query))
+    (if (.-addEventListener query)
+      (.addEventListener query "change" sync-theme)
+      (.addListener query sync-theme))))
 
 (defn clamp [value low high]
   (max low (min high value)))
@@ -58,17 +120,80 @@
       (js/String.fromCodePoint cp)
       (catch :default _ ""))))
 
+(defn kind-code [kind]
+  (case kind
+    "control" 1
+    "surrogate" 2
+    "private" 3
+    0))
+
+(defn build-indexes [data]
+  (let [length (inc (:maxCodepoint data))
+        kind-by-cp (js/Uint8Array. length)
+        range-by-cp (js/Int16Array. length)
+        block-by-cp (js/Int16Array. length)
+        script-by-cp (js/Uint16Array. length)
+        assigned-by-cp (js/Uint16Array. length)]
+    (doseq [[idx assigned-range] (map-indexed vector (:assignedRanges data))]
+      (loop [cp (:start assigned-range)]
+        (when (<= cp (:end assigned-range))
+          (aset assigned-by-cp cp (inc idx))
+          (aset kind-by-cp cp 4)
+          (recur (inc cp)))))
+    (doseq [[idx block] (map-indexed vector (:blocks data))]
+      (loop [cp (:start block)]
+        (when (<= cp (:end block))
+          (aset block-by-cp cp (inc idx))
+          (recur (inc cp)))))
+    (doseq [[idx script] (map-indexed vector (:scripts data))]
+      (loop [cp (:start script)]
+        (when (<= cp (:end script))
+          (aset script-by-cp cp (inc idx))
+          (recur (inc cp)))))
+    (doseq [[idx range] (map-indexed vector (:ranges data))]
+      (let [code (kind-code (:kind range))]
+        (loop [cp (:start range)]
+          (when (<= cp (:end range))
+            (aset range-by-cp cp (inc idx))
+            (aset kind-by-cp cp code)
+            (recur (inc cp))))))
+    {:kind-by-cp kind-by-cp
+     :range-by-cp range-by-cp
+     :block-by-cp block-by-cp
+     :script-by-cp script-by-cp
+     :assigned-by-cp assigned-by-cp}))
+
 (defn find-range [cp]
-  (some (fn [range]
-          (when (<= (:start range) cp (:end range))
-            range))
-        (get-in @state [:data :ranges])))
+  (if-let [range-by-cp (:range-by-cp @state)]
+    (let [idx (aget range-by-cp cp)]
+      (when (pos? idx)
+        (get-in @state [:data :ranges (dec idx)])))
+    (some (fn [range]
+            (when (<= (:start range) cp (:end range))
+              range))
+          (get-in @state [:data :ranges]))))
 
 (defn find-block [cp]
-  (some (fn [block]
-          (when (<= (:start block) cp (:end block))
-            block))
-        (get-in @state [:data :blocks])))
+  (if-let [block-by-cp (:block-by-cp @state)]
+    (let [idx (aget block-by-cp cp)]
+      (when (pos? idx)
+        (get-in @state [:data :blocks (dec idx)])))
+    (some (fn [block]
+            (when (<= (:start block) cp (:end block))
+              block))
+          (get-in @state [:data :blocks]))))
+
+(defn find-script [cp]
+  (when-let [script-by-cp (:script-by-cp @state)]
+    (let [idx (aget script-by-cp cp)]
+      (when (pos? idx)
+        (get-in @state [:data :scripts (dec idx)])))))
+
+(defn find-assigned [cp]
+  (when-let [assigned-by-cp (:assigned-by-cp @state)]
+    (let [idx (aget assigned-by-cp cp)]
+      (when (pos? idx)
+        (get-in @state [:data :assignedRanges (dec idx)])))))
 
 (defn find-plane [cp]
   (get-in @state [:data :planes (js/Math.floor (/ cp 0x10000))]))
@@ -154,7 +279,7 @@
     (set! (.. canvas -style -width) (str (.-innerWidth js/window) "px"))
     (set! (.. canvas -style -height) (str (.-innerHeight js/window) "px"))
     (.setTransform ctx dpr 0 0 dpr 0 0)
-    (draw)))
+    (request-draw)))
 
 (defn fit []
   (let [padding 42
@@ -165,7 +290,7 @@
            :zoom next-zoom
            :offset-x (/ (- (.-innerWidth js/window) (* (world-width) next-zoom)) 2)
            :offset-y (/ (- (.-innerHeight js/window) (* (world-height) next-zoom)) 2))
-    (draw)))
+    (request-draw)))
 
 (defn zoom-at [delta x y]
   (let [{world-x :x world-y :y} (screen->world x y)
@@ -174,7 +299,7 @@
            :zoom next-zoom
            :offset-x (- x (* world-x next-zoom))
            :offset-y (- y (* world-y next-zoom)))
-    (draw)))
+    (request-draw)))
 
 (defn jump-to [cp]
   (let [cp (clamp cp 0 (:max-codepoint @state))
@@ -185,7 +310,7 @@
            :offset-x (- (/ (.-innerWidth js/window) 2) (* (+ x (/ size 2)) (:zoom @state)))
            :offset-y (- (/ (.-innerHeight js/window) 2) (* (+ y (/ size 2)) (:zoom @state))))
     (update-hud)
-    (draw)))
+    (request-draw)))
 
 (defn parse-codepoint [value]
   (let [trimmed (str/trim value)
@@ -197,7 +322,7 @@
           cp)))))
 
 (defn draw-background [width height]
-  (set! (.-fillStyle ctx) (:background colors))
+  (set! (.-fillStyle ctx) (:background @colors))
   (.fillRect ctx 0 0 width height))
 
 (defn draw-plane-tiles [width height]
@@ -210,17 +335,17 @@
           y (+ (:offset-y @state) (* (:y origin) (:zoom @state)))
           side (* (plane-size) (:zoom @state))]
       (when (and (<= x width) (<= y height) (>= (+ x side) 0) (>= (+ y side) 0))
-        (set! (.-fillStyle ctx) (if (even? (:number plane)) (:plane-a colors) (:plane-b colors)))
+        (set! (.-fillStyle ctx) (if (even? (:number plane)) (:plane-a @colors) (:plane-b @colors)))
         (.fillRect ctx x y side side)
-        (set! (.-strokeStyle ctx) (:plane-line colors))
-        (set! (.-lineWidth ctx) 1)
+        (set! (.-strokeStyle ctx) (:plane-line @colors))
+        (set! (.-lineWidth ctx) 2)
         (.strokeRect ctx x y side side)
         (.save ctx)
         (.beginPath ctx)
         (.rect ctx x y side side)
         (.clip ctx)
         (when (> side 28)
-          (set! (.-fillStyle ctx) (:muted colors))
+          (set! (.-fillStyle ctx) (:muted @colors))
           (.fillText ctx (str "Plane " (:number plane)) (+ x 6) (+ y 5)))
         (when (and (> side 180)
                    (not= (:name plane) (str "Plane " (:number plane))))
@@ -249,7 +374,7 @@
               (when (and (<= sx width) (<= sy height)
                          (>= (+ sx (* (:columns @state) size)) 0)
                          (>= (+ sy h) 0))
-                (set! (.-fillStyle ctx) (get colors color-key (:default colors)))
+                (set! (.-fillStyle ctx) (get @colors color-key (:default @colors)))
                 (set! (.-globalAlpha ctx) (if (< size 2) 0.85 0.45))
                 (.fillRect ctx sx sy (* (:columns @state) size) (max 1 h))
                 (set! (.-globalAlpha ctx) 1))
@@ -271,46 +396,50 @@
     (when (>= size 2)
       (.save ctx)
       (set! (.-lineWidth ctx) 1)
-      (set! (.-strokeStyle ctx) (:grid colors))
+      (set! (.-strokeStyle ctx) (:grid @colors))
       (set! (.-font ctx) (str (max 8 (js/Math.floor (* size 0.58))) "px " (:font @state)))
       (set! (.-textAlign ctx) "center")
       (set! (.-textBaseline ctx) "middle")
-      (doseq [plane (range (plane-count))]
-        (let [{:keys [sx sy min-col max-col min-row max-row]} (visible-plane-range plane width height)]
-          (doseq [row (range min-row (inc max-row))
-                  col (range min-col (inc max-col))]
-            (let [cp (+ (* plane 0x10000) (* row (:columns @state)) col)
-                  x (+ sx (* col size))
-                  y (+ sy (* row size))
-                  range (find-range cp)
-                  block (find-block cp)]
-              (set! (.-fillStyle ctx)
-                    (cond
-                      range (get colors (keyword (:kind range)) (:default colors))
-                      block (:seed-block colors)
-                      :else (:default colors)))
-              (set! (.-globalAlpha ctx) (cond range 0.42 block 0.28 :else 0.2))
-              (.fillRect ctx x y size size)
-              (set! (.-globalAlpha ctx) 1)
-              (when (>= size 7)
-                (.strokeRect ctx x y size size))
-              (when (>= size 13)
-                (let [glyph (glyph-for cp)]
-                  (when-not (str/blank? glyph)
-                    (set! (.-fillStyle ctx) (:text colors))
-                    (.fillText ctx glyph (+ x (/ size 2)) (+ y (/ size 2) 1)))))
-              (when (>= size 42)
-                (set! (.-fillStyle ctx) (:muted colors))
-                (set! (.-font ctx) "9px ui-monospace, SFMono-Regular, Menlo, monospace")
-                (.fillText ctx (code-label cp) (+ x (/ size 2)) (- (+ y size) 9))
-                (set! (.-font ctx) (str (max 8 (js/Math.floor (* size 0.58))) "px " (:font @state))))))))
+      (let [kind-by-cp (:kind-by-cp @state)
+            columns (:columns @state)]
+        (doseq [plane (range (plane-count))]
+          (let [{:keys [sx sy min-col max-col min-row max-row]} (visible-plane-range plane width height)]
+            (loop [row min-row]
+              (when (<= row max-row)
+                (loop [col min-col]
+                  (when (<= col max-col)
+                    (let [cp (+ (* plane 0x10000) (* row columns) col)
+                          x (+ sx (* col size))
+                          y (+ sy (* row size))
+                          kind (aget kind-by-cp cp)]
+                      (set! (.-fillStyle ctx) (aget @kind-colors kind))
+                      (set! (.-globalAlpha ctx) (aget @kind-alphas kind))
+                      (.fillRect ctx x y size size)
+                      (set! (.-globalAlpha ctx) 1)
+                      (when (>= size 7)
+                        (.strokeRect ctx x y size size))
+                      (when (and (>= size 13)
+                                 (not (zero? kind))
+                                 (not= kind 1)
+                                 (not= kind 2))
+                        (let [glyph (glyph-for cp)]
+                          (when-not (str/blank? glyph)
+                            (set! (.-fillStyle ctx) (:text @colors))
+                            (.fillText ctx glyph (+ x (/ size 2)) (+ y (/ size 2) 1)))))
+                      (when (>= size 42)
+                        (set! (.-fillStyle ctx) (:muted @colors))
+                        (set! (.-font ctx) "9px ui-monospace, SFMono-Regular, Menlo, monospace")
+                        (.fillText ctx (code-label cp) (+ x (/ size 2)) (- (+ y size) 9))
+                        (set! (.-font ctx) (str (max 8 (js/Math.floor (* size 0.58))) "px " (:font @state)))))
+                    (recur (inc col))))
+                (recur (inc row)))))))
       (.restore ctx))))
 
 (defn draw-selection []
   (let [{:keys [x y size]} (codepoint->screen (:selected @state))]
     (.save ctx)
     (set! (.-lineWidth ctx) (max 2 (min 5 (* size 0.1))))
-    (set! (.-strokeStyle ctx) (:selected colors))
+    (set! (.-strokeStyle ctx) (:selected @colors))
     (.strokeRect ctx x y size size)
     (.restore ctx)))
 
@@ -328,12 +457,22 @@
   (let [plane (find-plane cp)
         range (find-range cp)
         block (find-block cp)
+        script (find-script cp)
+        assigned (find-assigned cp)
         glyph (glyph-for cp)]
     (str (code-label cp)
-         (when-not (str/blank? glyph) (str "  " glyph))
+         (when (and assigned
+                    (not range)
+                    (not (str/blank? glyph)))
+           (str "  " glyph))
          "  Plane " (:number plane)
          (when block (str "  " (:name block)))
-         (when range (str "  " (:label range))))))
+         (cond
+           range (str "  " (:label range))
+           assigned (str "  " (:category assigned)
+                         (when script (str "  " (:script script)))
+                         "  " (:name assigned))
+           :else "  unassigned"))))
 
 (defn update-hud []
   (when (:data @state)
@@ -351,7 +490,7 @@
            (.add (.-fonts js/document) loaded-face)
            (swap! state assoc :font name)
            (update-hud)
-           (draw))))))
+           (request-draw))))))
 
 (defn bind-events []
   (.addEventListener js/window "resize" resize)
@@ -376,7 +515,7 @@
                       (update :offset-y + (- (.-clientY event) (:drag-y s)))
                       (assoc :drag-x (.-clientX event)
                              :drag-y (.-clientY event)))))
-         (draw))
+         (request-draw))
        (do
          (swap! state assoc :hover (screen->codepoint (.-clientX event) (.-clientY event)))
          (update-hud)))))
@@ -389,7 +528,7 @@
      (when-let [cp (screen->codepoint (.-clientX event) (.-clientY event))]
        (swap! state assoc :selected cp)
        (update-hud)
-       (draw))))
+       (request-draw))))
   (.addEventListener
    canvas "wheel"
    (fn [event]
@@ -416,16 +555,18 @@
            (.catch (fn [err] (.error js/console err))))))))
 
 (defn init []
+  (bind-system-theme!)
   (bind-events)
   (-> (js/fetch "/data/map.json")
       (.then (fn [response] (.json response)))
       (.then
        (fn [data]
          (let [data (js->clj data :keywordize-keys true)]
-           (swap! state assoc
-                  :data data
-                  :columns (:columns data)
-                  :max-codepoint (:maxCodepoint data))
+           (swap! state merge
+                  (build-indexes data)
+                  {:data data
+                   :columns (:columns data)
+                   :max-codepoint (:maxCodepoint data)})
            (resize)
            (fit)
            (update-hud))))

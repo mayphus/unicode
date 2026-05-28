@@ -8,11 +8,14 @@
          racket/path
          racket/port
          racket/string
+         net/url
          net/uri-codec)
 
 (define max-codepoint #x10FFFF)
 (define columns 256)
 (define rows (ceiling (/ (+ max-codepoint 1) columns)))
+(define ucd-base-url "https://www.unicode.org/Public/UCD/latest/ucd/")
+(define ucd-files '("Blocks.txt" "Scripts.txt" "UnicodeData.txt"))
 
 (define planes
   (for/list ([plane (in-range 17)])
@@ -55,6 +58,7 @@
    (hash 'start #x1F300 'end #x1FAFF 'name "Emoji and Symbols")))
 
 (define (ensure-output!)
+  (make-directory* "data/ucd")
   (make-directory* "public/data")
   (make-directory* "public/fonts"))
 
@@ -64,15 +68,114 @@
     (lambda (out)
       (racket-write-json value out))))
 
+(define (strip-comment line)
+  (string-trim (regexp-replace #px"#.*$" line "")))
+
+(define (hex->number text)
+  (string->number text 16))
+
+(define (parse-range text)
+  (match (string-split (string-trim text) "..")
+    [(list one) (define cp (hex->number one)) (values cp cp)]
+    [(list start end) (values (hex->number start) (hex->number end))]
+    [_ (error 'parse-range "bad range: ~a" text)]))
+
+(define (parse-ranged-file path key-name)
+  (call-with-input-file path
+    (lambda (in)
+      (for/list ([line (in-lines in)]
+                 #:do [(define clean (strip-comment line))]
+                 #:unless (string=? clean ""))
+        (match (map string-trim (string-split clean ";"))
+          [(list range label)
+           (define-values (start end) (parse-range range))
+           (hash 'start start 'end end key-name label)]
+          [_ (error 'parse-ranged-file "bad line in ~a: ~a" path line)])))))
+
+(define (unicode-range-name raw)
+  (regexp-replace #px", First>$" raw ">"))
+
+(define (parse-unicode-data path)
+  (define ranges '())
+  (define pending #f)
+  (call-with-input-file path
+    (lambda (in)
+      (for ([line (in-lines in)])
+        (define fields (string-split line ";"))
+        (match fields
+          [(list cp-text name category _ ...)
+           (define cp (hex->number cp-text))
+           (cond
+             [(regexp-match? #px", First>$" name)
+              (set! pending (list cp (unicode-range-name name) category))]
+             [(and pending (regexp-match? #px", Last>$" name))
+              (match-define (list start range-name range-category) pending)
+              (set! ranges (cons (hash 'start start
+                                       'end cp
+                                       'name range-name
+                                       'category range-category)
+                                 ranges))
+              (set! pending #f)]
+             [else
+              (set! ranges (cons (hash 'start cp
+                                       'end cp
+                                       'name name
+                                       'category category)
+                                 ranges))])]
+          [_ (error 'parse-unicode-data "bad line: ~a" line)]))))
+  (reverse ranges))
+
+(define (ucd-path file)
+  (build-path "data" "ucd" file))
+
+(define (have-ucd?)
+  (for/and ([file (in-list ucd-files)])
+    (file-exists? (ucd-path file))))
+
+(define (fetch-file file)
+  (define target (ucd-path file))
+  (define url (string->url (string-append ucd-base-url file)))
+  (printf "fetching ~a\n" url)
+  (define in (get-pure-port url))
+  (dynamic-wind
+    void
+    (lambda ()
+      (call-with-output-file target
+        #:exists 'replace
+        (lambda (out)
+          (copy-port in out))))
+    (lambda ()
+      (close-input-port in))))
+
+(define (fetch)
+  (ensure-output!)
+  (for ([file (in-list ucd-files)])
+    (fetch-file file)))
+
+(define (load-ucd)
+  (if (have-ucd?)
+      (hash 'blocks (parse-ranged-file (ucd-path "Blocks.txt") 'name)
+            'scripts (parse-ranged-file (ucd-path "Scripts.txt") 'script)
+            'assignedRanges (parse-unicode-data (ucd-path "UnicodeData.txt"))
+            'source "data/ucd")
+      (hash 'blocks seed-blocks
+            'scripts '()
+            'assignedRanges '()
+            'source "seed")))
+
 (define (build)
   (ensure-output!)
+  (define ucd (load-ucd))
   (write-json-file "public/data/map.json"
                    (hash 'maxCodepoint max-codepoint
                          'columns columns
                          'rows rows
                          'planes planes
                          'ranges ranges
-                         'blocks seed-blocks))
+                         'blocks (hash-ref ucd 'blocks)
+                         'scripts (hash-ref ucd 'scripts)
+                         'assignedRanges (hash-ref ucd 'assignedRanges)
+                         'source (hash-ref ucd 'source)))
   (displayln "wrote public/data/map.json"))
 
 (define (content-type path)
@@ -160,5 +263,6 @@
    #:args ([command "build"])
    (match command
      ["build" (build)]
+     ["fetch" (fetch)]
      ["serve" (serve)]
      [_ (error 'unicode-map "unknown command: ~a" command)])))

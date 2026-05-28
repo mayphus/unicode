@@ -1,8 +1,15 @@
 :root {
-  color-scheme: dark;
+  color-scheme: light dark;
   font-family: ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
-  background: #111312;
-  color: #f4f1e8;
+  background: #f6f4ef;
+  color: #222722;
+}
+
+@media (prefers-color-scheme: dark) {
+  :root {
+    background: #111312;
+    color: #f4f1e8;
+  }
 }
 
 * {
@@ -29,8 +36,14 @@ body {
   display: block;
   width: 100vw;
   height: 100vh;
-  background: #121614;
+  background: #f6f4ef;
   cursor: grab;
+}
+
+@media (prefers-color-scheme: dark) {
+  #map {
+    background: #121614;
+  }
 }
 
 #map.dragging {
@@ -42,9 +55,16 @@ body {
   left: 12px;
   top: 10px;
   max-width: calc(100vw - 24px);
-  color: rgba(244, 241, 232, 0.76);
+  color: rgba(34, 39, 34, 0.76);
   font: 12px/1.45 ui-monospace, SFMono-Regular, Menlo, monospace;
   pointer-events: none;
-  text-shadow: 0 1px 8px rgba(0, 0, 0, 0.85);
+  text-shadow: 0 1px 8px rgba(255, 255, 255, 0.85);
   white-space: pre-wrap;
+}
+
+@media (prefers-color-scheme: dark) {
+  #hud {
+    color: rgba(244, 241, 232, 0.76);
+    text-shadow: 0 1px 8px rgba(0, 0, 0, 0.85);
+  }
 }

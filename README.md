@@ -12,7 +12,13 @@ The split is:
 
 ## Try it
 
-Build the data:
+Fetch the official Unicode Character Database files:
+
+```sh
+racket main.rkt fetch
+```
+
+Build the map data:
 
 ```sh
 racket main.rkt build
@@ -32,19 +38,19 @@ http://localhost:8080
 
 ## Font loading
 
-Put font files in `public/fonts/` and choose one in the app. You can also load a
-local font file from the font picker. The app uses `FontFace`, so `.ttf`,
-`.otf`, `.woff`, and `.woff2` files are good targets.
+Press `f` in the app to load a local font file. The app uses `FontFace`, so
+`.ttf`, `.otf`, `.woff`, and `.woff2` files are good targets.
 
-## Next data step
+## Data
 
-This first version maps the whole code point space and highlights structural
-ranges such as surrogates and private-use areas. The next useful backend step is
-to add official Unicode data files under `data/ucd/`:
+`main.rkt fetch` downloads these files under `data/ucd/` from the official UCD
+latest URL:
 
 - `Blocks.txt`
 - `UnicodeData.txt`
 - `Scripts.txt`
 
-Then `main.rkt` can emit richer block, name, category, and script chunks for the
-canvas viewport to load on demand.
+`main.rkt build` parses them and emits `public/data/map.json` with blocks,
+scripts, assigned ranges, categories, and structural ranges. The frontend uses
+typed arrays built from that metadata so unassigned code points stay visually
+quiet and glyph drawing is limited to assigned/renderable classes.
