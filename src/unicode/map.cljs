@@ -6,6 +6,7 @@
 (def canvas (.getElementById js/document "map"))
 (def ctx (.getContext canvas "2d" #js {:alpha false}))
 (def hud (.getElementById js/document "hud"))
+(def fit-button (.getElementById js/document "fit-button"))
 (def font-file (.getElementById js/document "font-file"))
 
 (def dark-colors
@@ -71,6 +72,9 @@
          :dragging? false
          :drag-x 0
          :drag-y 0
+         :drag-start-x 0
+         :drag-start-y 0
+         :drag-moved? false
          :selected 0x4E00
          :hover nil
          :font "system-ui"
@@ -292,6 +296,39 @@
            :offset-y (/ (- (.-innerHeight js/window) (* (world-height) next-zoom)) 2))
     (request-draw)))
 
+(defn fit-world-rect [x y width height]
+  (let [padding 36
+        usable-width (max 1 (- (.-innerWidth js/window) padding))
+        usable-height (max 1 (- (.-innerHeight js/window) padding))
+        next-zoom (clamp (min (/ usable-width width)
+                              (/ usable-height height))
+                         0.01 4)]
+    (swap! state assoc
+           :zoom next-zoom
+           :offset-x (- (/ (.-innerWidth js/window) 2) (* (+ x (/ width 2)) next-zoom))
+           :offset-y (- (/ (.-innerHeight js/window) 2) (* (+ y (/ height 2)) next-zoom)))
+    (request-draw)))
+
+(defn fit-plane [plane]
+  (let [{:keys [x y]} (plane-origin plane)]
+    (fit-world-rect x y (plane-size) (plane-size))))
+
+(defn overview? []
+  (< (cell-size) 8))
+
+(defn screen->plane [x y]
+  (let [{world-x :x world-y :y} (screen->world x y)
+        step (+ (plane-size) (plane-gap))
+        grid-col (js/Math.floor (/ world-x step))
+        grid-row (js/Math.floor (/ world-y step))
+        local-x (- world-x (* grid-col step))
+        local-y (- world-y (* grid-row step))
+        plane (+ (* grid-row (:plane-grid-columns @state)) grid-col)]
+    (when (and (<= 0 plane (dec (plane-count)))
+               (<= 0 local-x (plane-size))
+               (<= 0 local-y (plane-size)))
+      plane)))
+
 (defn zoom-at [delta x y]
   (let [{world-x :x world-y :y} (screen->world x y)
         next-zoom (clamp (* (:zoom @state) delta) 0.01 4)]
@@ -497,24 +534,37 @@
   (.addEventListener
    canvas "pointerdown"
    (fn [event]
+     (.preventDefault event)
      (.setPointerCapture canvas (.-pointerId event))
      (swap! state assoc
             :dragging? true
             :drag-x (.-clientX event)
-            :drag-y (.-clientY event))
+            :drag-y (.-clientY event)
+            :drag-start-x (.-clientX event)
+            :drag-start-y (.-clientY event)
+            :drag-moved? false)
      (.add (.-classList canvas) "dragging")))
   (.addEventListener
    canvas "pointermove"
    (fn [event]
+     (.preventDefault event)
      (if (:dragging? @state)
        (do
          (swap! state
                 (fn [s]
-                  (-> s
-                      (update :offset-x + (- (.-clientX event) (:drag-x s)))
-                      (update :offset-y + (- (.-clientY event) (:drag-y s)))
-                      (assoc :drag-x (.-clientX event)
-                             :drag-y (.-clientY event)))))
+                  (let [dx (- (.-clientX event) (:drag-x s))
+                        dy (- (.-clientY event) (:drag-y s))
+                        total-dx (- (.-clientX event) (:drag-start-x s))
+                        total-dy (- (.-clientY event) (:drag-start-y s))]
+                    (-> s
+                        (update :offset-x + dx)
+                        (update :offset-y + dy)
+                        (assoc :drag-x (.-clientX event)
+                               :drag-y (.-clientY event)
+                               :drag-moved? (or (:drag-moved? s)
+                                                (> (+ (* total-dx total-dx)
+                                                      (* total-dy total-dy))
+                                                   36)))))))
          (request-draw))
        (do
          (swap! state assoc :hover (screen->codepoint (.-clientX event) (.-clientY event)))
@@ -522,13 +572,25 @@
   (.addEventListener
    canvas "pointerup"
    (fn [event]
+     (.preventDefault event)
      (.releasePointerCapture canvas (.-pointerId event))
-     (swap! state assoc :dragging? false)
+     (let [was-drag? (:drag-moved? @state)
+           plane (screen->plane (.-clientX event) (.-clientY event))]
+       (swap! state assoc :dragging? false)
+       (.remove (.-classList canvas) "dragging")
+       (cond
+         was-drag? nil
+         (and plane (overview?)) (fit-plane plane)
+         :else (when-let [cp (screen->codepoint (.-clientX event) (.-clientY event))]
+                 (swap! state assoc :selected cp)
+                 (update-hud)
+                 (request-draw))))))
+  (.addEventListener
+   canvas "pointercancel"
+   (fn [event]
+     (.preventDefault event)
      (.remove (.-classList canvas) "dragging")
-     (when-let [cp (screen->codepoint (.-clientX event) (.-clientY event))]
-       (swap! state assoc :selected cp)
-       (update-hud)
-       (request-draw))))
+     (swap! state assoc :dragging? false :drag-moved? false)))
   (.addEventListener
    canvas "wheel"
    (fn [event]
@@ -537,6 +599,7 @@
               (.-clientX event)
               (.-clientY event)))
    #js {:passive false})
+  (.addEventListener fit-button "click" fit)
   (.addEventListener
    js/window "keydown"
    (fn [event]
