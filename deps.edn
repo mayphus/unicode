@@ -1,0 +1,9 @@
+{:paths ["src"]
+ :deps {org.clojure/clojure {:mvn/version "1.12.5"}
+        org.clojure/clojurescript {:mvn/version "1.11.132"}}
+ :aliases
+ {:cljs
+  {:main-opts ["-m" "cljs.main"
+               "-O" "simple"
+               "-o" "public/app.js"
+               "-c" "unicode.map"]}}}
