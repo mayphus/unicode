@@ -51,6 +51,10 @@ latest URL:
 - `Scripts.txt`
 
 `main.rkt build` parses them and emits `public/data/map.json` with blocks,
-scripts, assigned ranges, categories, and structural ranges. The frontend uses
-typed arrays built from that metadata so unassigned code points stay visually
-quiet and glyph drawing is limited to assigned/renderable classes.
+scripts, assigned ranges, categories, and structural ranges. The checked-in data
+does not include local font coverage, because that would reflect the build
+machine's installed fonts. For local experiments, run
+`UNICODE_MAP_FONT_COVERAGE=1 racket main.rkt build` to add aggregate font
+coverage ranges to the generated JSON. The frontend uses typed arrays built from
+that metadata so unassigned code points stay visually quiet and glyph drawing is
+limited to assigned/renderable classes.

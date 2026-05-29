@@ -62,6 +62,9 @@
          :block-by-cp nil
          :script-by-cp nil
          :assigned-by-cp nil
+         :font-covered-by-cp nil
+         :font-coverage-enabled? true
+         :font-coverage-source "none"
          :dpr 1
          :columns 256
          :max-codepoint 0x10FFFF
@@ -143,7 +146,9 @@
         range-by-cp (js/Int16Array. length)
         block-by-cp (js/Int16Array. length)
         script-by-cp (js/Uint16Array. length)
-        assigned-by-cp (js/Uint16Array. length)]
+        assigned-by-cp (js/Uint16Array. length)
+        font-covered-by-cp (when (seq (:fontCoverageRanges data))
+                             (js/Uint8Array. length))]
     (doseq [[idx assigned-range] (map-indexed vector (:assignedRanges data))]
       (loop [cp (:start assigned-range)]
         (when (<= cp (:end assigned-range))
@@ -167,11 +172,19 @@
             (aset range-by-cp cp (inc idx))
             (aset kind-by-cp cp code)
             (recur (inc cp))))))
+    (when font-covered-by-cp
+      (doseq [coverage-range (:fontCoverageRanges data)]
+        (loop [cp (:start coverage-range)]
+          (when (<= cp (:end coverage-range))
+            (aset font-covered-by-cp cp 1)
+            (recur (inc cp))))))
     {:kind-by-cp kind-by-cp
      :range-by-cp range-by-cp
      :block-by-cp block-by-cp
      :script-by-cp script-by-cp
-     :assigned-by-cp assigned-by-cp}))
+     :assigned-by-cp assigned-by-cp
+     :font-covered-by-cp font-covered-by-cp
+     :font-coverage-source (or (:fontCoverageSource data) "none")}))
 
 (defn find-range [cp]
   (if-let [range-by-cp (:range-by-cp @state)]
@@ -204,6 +217,20 @@
     (let [idx (aget assigned-by-cp cp)]
       (when (pos? idx)
         (get-in @state [:data :assignedRanges (dec idx)])))))
+
+(defn font-covered? [cp]
+  (if (and (:font-coverage-enabled? @state)
+           (:font-covered-by-cp @state))
+    (pos? (aget (:font-covered-by-cp @state) cp))
+    true))
+
+(defn drawable-missing-font? [cp kind size]
+  (and (>= size 13)
+       (not (zero? kind))
+       (not= kind 1)
+       (not= kind 2)
+       (not (font-covered? cp))
+       (not (str/blank? (glyph-for cp)))))
 
 (defn find-plane [cp]
   (get-in @state [:data :planes (js/Math.floor (/ cp 0x10000))]))
@@ -300,6 +327,7 @@
            :zoom next-zoom
            :offset-x (/ (- (.-innerWidth js/window) (* (world-width) next-zoom)) 2)
            :offset-y (/ (- (.-innerHeight js/window) (* (world-height) next-zoom)) 2))
+    (update-hud)
     (request-draw)))
 
 (defn fit-world-rect [x y width height]
@@ -313,6 +341,7 @@
            :zoom next-zoom
            :offset-x (- (/ (.-innerWidth js/window) 2) (* (+ x (/ width 2)) next-zoom))
            :offset-y (- (/ (.-innerHeight js/window) 2) (* (+ y (/ height 2)) next-zoom)))
+    (update-hud)
     (request-draw)))
 
 (defn fit-plane [plane]
@@ -342,6 +371,7 @@
            :zoom next-zoom
            :offset-x (- x (* world-x next-zoom))
            :offset-y (- y (* world-y next-zoom)))
+    (update-hud)
     (request-draw)))
 
 (defn pointer-position [event]
@@ -527,7 +557,8 @@
                       (when (and (>= size 13)
                                  (not (zero? kind))
                                  (not= kind 1)
-                                 (not= kind 2))
+                                 (not= kind 2)
+                                 (font-covered? cp))
                         (let [glyph (glyph-for cp)]
                           (when-not (str/blank? glyph)
                             (set! (.-fillStyle ctx) (:text @colors))
@@ -577,24 +608,63 @@
            range (str "  " (:label range))
            assigned (str "  " (:category assigned)
                          (when script (str "  " (:script script)))
+                         (when-not (font-covered? cp) "  missing font")
                          "  " (:name assigned))
            :else "  unassigned"))))
+
+(defn visible-missing-font-count []
+  (let [width (.-innerWidth js/window)
+        height (.-innerHeight js/window)
+        size (cell-size)]
+    (if (and (:kind-by-cp @state) (>= size 13))
+      (let [kind-by-cp (:kind-by-cp @state)
+            columns (:columns @state)]
+        (loop [plane 0
+               total 0]
+          (if (< plane (plane-count))
+            (let [{:keys [min-col max-col min-row max-row]} (visible-plane-range plane width height)]
+              (recur
+               (inc plane)
+               (+ total
+                  (loop [row min-row
+                         row-total 0]
+                    (if (<= row max-row)
+                      (recur
+                       (inc row)
+                       (+ row-total
+                          (loop [col min-col
+                                 col-total 0]
+                            (if (<= col max-col)
+                              (let [cp (+ (* plane 0x10000) (* row columns) col)
+                                    kind (aget kind-by-cp cp)]
+                                (recur (inc col)
+                                       (if (drawable-missing-font? cp kind size)
+                                         (inc col-total)
+                                         col-total)))
+                              col-total))))
+                      row-total)))))
+            total)))
+      0)))
 
 (defn update-hud []
   (when (:data @state)
     (set! (.-textContent hud)
           (str "Unicode plane matrix"
-               "\n" (info-line (or (:hover @state) (:selected @state)))))))
+               "\n" (info-line (or (:hover @state) (:selected @state)))
+               "\nVisible missing font: " (visible-missing-font-count)))))
 
 (defn load-font [file]
   (let [name (str "LoadedFont" (.now js/Date))
         url (.createObjectURL js/URL file)
         face (js/FontFace. name (str "url(" url ")"))]
     (-> (.load face)
-        (.then
+         (.then
          (fn [loaded-face]
            (.add (.-fonts js/document) loaded-face)
-           (swap! state assoc :font name)
+           (swap! state assoc
+                  :font name
+                  :font-coverage-enabled? false
+                  :font-coverage-source "custom font")
            (update-hud)
            (request-draw))))))
 
@@ -716,6 +786,7 @@
                   (build-indexes data)
                   {:data data
                    :columns (:columns data)
+                   :font-coverage-enabled? (seq (:fontCoverageRanges data))
                    :max-codepoint (:maxCodepoint data)})
            (resize)
            (fit)

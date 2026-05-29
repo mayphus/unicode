@@ -8,6 +8,7 @@
          racket/path
          racket/port
          racket/string
+         racket/system
          net/url
          net/uri-codec)
 
@@ -16,6 +17,11 @@
 (define rows (ceiling (/ (+ max-codepoint 1) columns)))
 (define ucd-base-url "https://www.unicode.org/Public/UCD/latest/ucd/")
 (define ucd-files '("Blocks.txt" "Scripts.txt" "UnicodeData.txt"))
+
+(define (truthy-env? name)
+  (match (getenv name)
+    [(or "1" "true" "yes" "on") #t]
+    [_ #f]))
 
 (define planes
   (for/list ([plane (in-range 17)])
@@ -163,9 +169,73 @@
             'assignedRanges '()
             'source "seed")))
 
+(define (command-lines exe . args)
+  (if exe
+      (string-split
+       (with-output-to-string
+         (lambda ()
+           (with-handlers ([exn:fail? (lambda (_err) #f)])
+             (apply system* exe args))))
+       "\n"
+       #:trim? #t)
+      '()))
+
+(define (parse-fontconfig-charset text)
+  (for/list ([token (in-list (string-split text))]
+             #:do [(define pieces (string-split token "-"))]
+             #:when (or (= 1 (length pieces)) (= 2 (length pieces))))
+    (match pieces
+      [(list one)
+       (define cp (hex->number one))
+       (and cp (cons cp cp))]
+      [(list start end)
+       (define start-cp (hex->number start))
+       (define end-cp (hex->number end))
+       (and start-cp end-cp (cons start-cp end-cp))])))
+
+(define (merge-ranges raw-ranges)
+  (define ranges
+    (sort (filter values raw-ranges) < #:key car))
+  (define merged '())
+  (for ([range (in-list ranges)])
+    (match merged
+      ['() (set! merged (list range))]
+      [(cons current rest)
+       (if (<= (car range) (add1 (cdr current)))
+           (set! merged (cons (cons (car current) (max (cdr current) (cdr range))) rest))
+           (set! merged (cons range merged)))]))
+  (reverse merged))
+
+(define (system-font-coverage-ranges)
+  (define fc-list (find-executable-path "fc-list"))
+  (define fc-query (find-executable-path "fc-query"))
+  (cond
+    [(not (and fc-list fc-query)) '()]
+    [else
+     (define font-files
+       (remove-duplicates
+        (filter (lambda (file)
+                  (and (not (string=? file ""))
+                       (not (regexp-match? #px"LastResort" file))))
+                (command-lines fc-list "-f" "%{file}\n"))))
+     (define raw-ranges
+       (append*
+        (for/list ([font-file (in-list font-files)])
+          (parse-fontconfig-charset
+           (string-join
+            (command-lines fc-query "--format" "%{charset}\n" font-file)
+            " ")))))
+     (for/list ([range (in-list (merge-ranges raw-ranges))])
+       (hash 'start (car range) 'end (cdr range)))]))
+
 (define (build)
   (ensure-output!)
   (define ucd (load-ucd))
+  (define include-font-coverage? (truthy-env? "UNICODE_MAP_FONT_COVERAGE"))
+  (define font-coverage-ranges
+    (if include-font-coverage?
+        (system-font-coverage-ranges)
+        '()))
   (write-json-file "public/data/map.json"
                    (hash 'maxCodepoint max-codepoint
                          'columns columns
@@ -175,6 +245,12 @@
                          'blocks (hash-ref ucd 'blocks)
                          'scripts (hash-ref ucd 'scripts)
                          'assignedRanges (hash-ref ucd 'assignedRanges)
+                         'fontCoverageRanges font-coverage-ranges
+                         'fontCoverageSource (if (null? font-coverage-ranges)
+                                                 (if include-font-coverage?
+                                                     "none"
+                                                     "disabled")
+                                                 "fontconfig without LastResort")
                          'source (hash-ref ucd 'source)))
   (displayln "wrote public/data/map.json"))
 
