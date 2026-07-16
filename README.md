@@ -1,5 +1,7 @@
 # Unicode Map
 
+> **Status:** Active prototype — exploring the entire Unicode code-point space as one navigable canvas.
+
 A first slice for exploring the whole Unicode code point space as one large
 canvas map.
 
